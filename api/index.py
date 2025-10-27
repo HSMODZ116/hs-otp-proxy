@@ -1,54 +1,71 @@
 import httpx
-import json
+import time
+import hashlib
 from fastapi import FastAPI, Request, HTTPException
 
 app = FastAPI(title="HS OTP Proxy", version="1.0")
 
 # === CONFIG ===
-TARGET_URL = "https://damp-resonance-12e3.ilyasbhai869.workers.dev/"
+TARGET = "https://damp-resonance-12e3.ilyasbhai869.workers.dev/"
+TIMEOUT = 15
 
-@app.options("/{path:path}")
-async def options_handler():
-    return {"status": "ok"}
 
-@app.post("/")
 @app.get("/")
+@app.post("/")
 async def proxy(request: Request, number: str = None):
-    # --- Read input ---
-    try:
-        if request.method == "POST":
-            body = await request.body()
-            data = json.loads(body.decode("utf-8") or "{}")
-        else:
-            data = {}
-    except Exception:
-        data = {}
-
-    # --- Support GET ?number= ---
-    if not data and number:
-        data = {"number": number}
-
-    # --- Validate payload ---
-    if not data or "number" not in data or not data["number"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Please provide a number via POST JSON or ?number= in GET"
-        )
-
-    # --- Forward to target Cloudflare Worker ---
+    # CORS
     headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     }
 
+    # Handle OPTIONS preflight
+    if request.method == "OPTIONS":
+        return {"success": True, "message": "CORS preflight ok"}
+
+    data = {}
     try:
-        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
-            response = await client.post(TARGET_URL, headers=headers, json=data)
-            return response.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Target server timeout")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error forwarding request: {str(e)}")
+        if request.method == "POST":
+            data = await request.json()
+        elif request.method == "GET":
+            if number:
+                data["number"] = number
+    except Exception:
+        pass
+
+    # --- Validate ---
+    number = data.get("number")
+    if not number:
+        return {
+            "success": False,
+            "message": "Please provide a number via POST JSON or ?number= in GET",
+        }
+
+    # Clean digits
+    number = "".join(ch for ch in number if ch.isdigit())
+
+    # --- Unique Request ID ---
+    request_key = hashlib.md5(f"{number}{time.time()}".encode()).hexdigest()
+
+    payload = {"number": number}
+
+    # --- Send to Cloudflare Worker ---
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT, verify=False) as client:
+            resp = await client.post(
+                TARGET,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            return resp.json()
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error forwarding request: {str(e)}"
+        )
 
 
 @app.get("/ping")
